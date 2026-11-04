@@ -1,6 +1,7 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { getModelMeta } from "../config/providerModels.js";
+import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 import { parseVertexSaJson, refreshVertexToken, refreshGoogleToken } from "../services/tokenRefresh.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 
@@ -65,6 +66,8 @@ export class VertexExecutor extends BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
+    // The model id goes into the URL path; drop a combo seat's thinking suffix ("model(high)").
+    model = stripThinkingSuffix(model);
     const saJson = parseVertexSaJson(credentials?.apiKey);
     const adcJson = parseVertexAdcJson(credentials?.apiKey);
     const usesOAuth = !!saJson || !!adcJson || !!credentials?.accessToken;

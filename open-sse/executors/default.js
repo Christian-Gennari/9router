@@ -8,6 +8,7 @@ import { buildClineHeaders } from "../shared/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 import { extractClaudeSessionIdFromUserId } from "../utils/claudeCloaking.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
@@ -169,9 +170,12 @@ export class DefaultExecutor extends BaseExecutor {
       const normalized = baseUrl.replace(/\/$/, "");
       return `${normalized}/messages`;
     }
-    // gemini-format: build :streamGenerateContent / :generateContent path
+    // gemini-format: build :streamGenerateContent / :generateContent path.
+    // The model id is a URL path segment here, so a combo seat's thinking suffix
+    // ("gemini-3.6-flash(high)") must be dropped — Google rejects it as an
+    // "unexpected model name format". chatCore already strips it from the body.
     if (this.config.format === "gemini") {
-      return `${this.config.baseUrl}/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
+      return `${this.config.baseUrl}/${stripThinkingSuffix(model)}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
     }
     // urlSuffix (e.g. ?beta=true) declared per-provider in registry
     if (this.config.urlSuffix) {
