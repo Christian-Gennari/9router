@@ -10,6 +10,7 @@ import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
 import {
   createNousApiKeyProbe,
   getNousApiKeyValidationError,
+  resolveNousProbeModel,
   isNousApiKeyAccepted,
 } from "open-sse/services/nous.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
@@ -317,7 +318,7 @@ export async function POST(request) {
         case "nous": {
           // Nous exposes /models publicly, so a models request cannot validate
           // the Portal key. Use the smallest authenticated inference instead.
-          const probe = createNousApiKeyProbe(apiKey);
+          const probe = createNousApiKeyProbe(apiKey, await resolveNousProbeModel());
           const res = await fetch(probe.url, {
             ...probe.options,
             signal: AbortSignal.timeout(8000),

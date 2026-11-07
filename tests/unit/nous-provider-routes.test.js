@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   NOUS_CHAT_COMPLETIONS_URL,
+  NOUS_MODELS_URL,
   NOUS_VALIDATION_MODEL,
 } from "../../open-sse/services/nous.js";
 import { parseModel } from "../../open-sse/services/model.js";
@@ -53,6 +54,25 @@ const makeResponse = (status) => new Response(JSON.stringify({ status }), {
   headers: { "Content-Type": "application/json" },
 });
 
+const freeModel = (id) => ({
+  id,
+  architecture: { output_modalities: ["text"] },
+  pricing: { prompt: "0", completion: "0" },
+});
+
+// Route the public catalogue and the chat probe separately: the probe first
+// reads /models to pick a live free model, then sends one chat request.
+const mockNous = ({ chatStatus = 200, models = [freeModel(NOUS_VALIDATION_MODEL)] } = {}) => {
+  global.fetch.mockImplementation(async (url) => (url === NOUS_MODELS_URL
+    ? new Response(JSON.stringify({ data: models }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+    : makeResponse(chatStatus)));
+};
+
+const chatCalls = () => global.fetch.mock.calls.filter(([url]) => url === NOUS_CHAT_COMPLETIONS_URL);
+
 const makeValidationRequest = () => new Request("http://localhost/api/providers/validate", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -87,15 +107,14 @@ describe("Nous route wiring (API key + OAuth)", () => {
   });
 
   it("validates a new key through chat rather than the public models endpoint", async () => {
-    global.fetch.mockResolvedValue(makeResponse(200));
+    mockNous();
 
     const response = await validateProvider(makeValidationRequest());
     const payload = await response.json();
 
     expect(payload).toEqual({ valid: true, error: null });
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    const [url, options] = global.fetch.mock.calls[0];
-    expect(url).toBe(NOUS_CHAT_COMPLETIONS_URL);
+    expect(chatCalls()).toHaveLength(1);
+    const [, options] = chatCalls()[0];
     expect(options).toMatchObject({
       method: "POST",
       headers: {
@@ -111,14 +130,14 @@ describe("Nous route wiring (API key + OAuth)", () => {
   });
 
   it("distinguishes rejected keys from inconclusive non-success responses", async () => {
-    global.fetch.mockResolvedValueOnce(makeResponse(401));
+    mockNous({ chatStatus: 401 });
     const rejected = await validateProvider(makeValidationRequest());
     expect(await rejected.json()).toEqual({
       valid: false,
       error: "Invalid or inactive API key",
     });
 
-    global.fetch.mockResolvedValueOnce(makeResponse(402));
+    mockNous({ chatStatus: 402 });
     const paymentRequired = await validateProvider(makeValidationRequest());
     expect(await paymentRequired.json()).toEqual({
       valid: false,
@@ -126,8 +145,32 @@ describe("Nous route wiring (API key + OAuth)", () => {
     });
   });
 
+  it("probes a live free model when the default one was retired", async () => {
+    mockNous({ models: [
+      { id: "vendor/paid-model", architecture: { output_modalities: ["text"] }, pricing: { prompt: "0.000001", completion: "0.000002" } },
+      freeModel("vendor/new-model:free"),
+    ] });
+
+    const response = await validateProvider(makeValidationRequest());
+
+    expect(await response.json()).toEqual({ valid: true, error: null });
+    expect(JSON.parse(chatCalls()[0][1].body).model).toBe("vendor/new-model:free");
+  });
+
+  it("falls back to the default probe model when the catalogue is unreachable", async () => {
+    global.fetch.mockImplementation(async (url) => {
+      if (url === NOUS_MODELS_URL) throw new Error("network down");
+      return makeResponse(200);
+    });
+
+    const response = await validateProvider(makeValidationRequest());
+
+    expect(await response.json()).toEqual({ valid: true, error: null });
+    expect(JSON.parse(chatCalls()[0][1].body).model).toBe(NOUS_VALIDATION_MODEL);
+  });
+
   it("uses the same authenticated probe for saved API-key connection tests", async () => {
-    global.fetch.mockResolvedValue(makeResponse(200));
+    mockNous();
 
     const result = await testSingleConnection("nous-connection");
 
@@ -156,11 +199,12 @@ describe("Nous route wiring (API key + OAuth)", () => {
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
       providerSpecificData: {},
     });
-    global.fetch.mockResolvedValue(makeResponse(200));
+    mockNous({ models: [freeModel("vendor/live-model:free")] });
 
     const result = await testSingleConnection("nous-oauth-conn");
 
     expect(result.valid).toBe(true);
+    expect(JSON.parse(chatCalls()[0][1].body).model).toBe("vendor/live-model:free");
     expect(global.fetch).toHaveBeenCalledWith(
       NOUS_CHAT_COMPLETIONS_URL,
       expect.objectContaining({

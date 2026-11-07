@@ -9,8 +9,9 @@ import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import { GROK_CLI_PAGER_USER_AGENT, GROK_CLI_VERSION } from "open-sse/config/grokCli.js";
 import {
   NOUS_CHAT_COMPLETIONS_URL,
-  NOUS_VALIDATION_MODEL,
+  buildNousProbeBody,
   createNousApiKeyProbe,
+  resolveNousProbeModel,
   getNousApiKeyValidationError,
   isNousApiKeyAccepted,
 } from "open-sse/services/nous.js";
@@ -162,12 +163,8 @@ const OAUTH_TEST_CONFIG = {
     authHeader: "Authorization",
     authPrefix: "Bearer ",
     extraHeaders: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: NOUS_VALIDATION_MODEL,
-      messages: [{ role: "user", content: "ping" }],
-      max_tokens: 1,
-      stream: false,
-    }),
+    // Nous rotates its free models; resolve a live one per test.
+    buildBody: async (fetchImpl) => buildNousProbeBody(await resolveNousProbeModel(fetchImpl)),
     refreshable: true,
     useApiKey: true,
   },
@@ -442,8 +439,11 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
     const headers = config.noAuth
       ? { ...config.extraHeaders }
       : { [config.authHeader]: `${config.authPrefix}${accessToken}`, ...config.extraHeaders };
+    const probeBody = config.buildBody
+      ? await config.buildBody((url, opts) => fetchWithConnectionProxy(url, opts, effectiveProxy))
+      : config.body;
     const fetchOpts = { method: config.method, headers };
-    if (config.body) fetchOpts.body = config.body;
+    if (probeBody) fetchOpts.body = probeBody;
     const res = await fetchWithConnectionProxy(testUrl, fetchOpts, effectiveProxy);
     const bodyText = !res.ok ? await res.text().catch(() => "") : "";
 
@@ -468,7 +468,7 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
           ? { ...config.extraHeaders }
           : { [config.authHeader]: `${config.authPrefix}${retryToken}`, ...config.extraHeaders };
         const retryOpts = { method: config.method, headers: retryHeaders };
-        if (config.body) retryOpts.body = config.body;
+        if (probeBody) retryOpts.body = probeBody;
         const retryRes = await fetchWithConnectionProxy(retryUrl, retryOpts, effectiveProxy);
         const retryBody = !retryRes.ok ? await retryRes.text().catch(() => "") : "";
         const retryClassified = classifyOAuthProbeResult(retryRes, config, retryBody);
@@ -665,7 +665,10 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       case "nous": {
         // /models is public on Nous; a minimal chat request is required to
         // distinguish an accepted Portal key from an arbitrary Bearer value.
-        const probe = createNousApiKeyProbe(connection.apiKey);
+        const probeModel = await resolveNousProbeModel(
+          (url, opts) => fetchWithConnectionProxy(url, opts, effectiveProxy),
+        );
+        const probe = createNousApiKeyProbe(connection.apiKey, probeModel);
         const res = await fetchWithConnectionProxy(probe.url, {
           ...probe.options,
           signal: AbortSignal.timeout(8000),

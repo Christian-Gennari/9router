@@ -8,11 +8,14 @@ export const NOUS_AGENT_KEY_URL = `${NOUS_PORTAL_BASE_URL}/api/oauth/agent-key`;
 export const NOUS_OAUTH_CLIENT_ID = "hermes-cli";
 export const NOUS_OAUTH_SCOPE = "inference:invoke inference:mint_agent_key";
 
-// Use a current free-tier text model for the one-token credential probe so
+// Fallback free-tier text model for the one-token credential probe so
 // validating a Portal key or OAuth token never consumes paid credits. Only
 // successful inference proves the Bearer credential was accepted; Nous can
 // return 4xx responses before authentication (e.g. 402 when Authorization is absent).
-export const NOUS_VALIDATION_MODEL = "poolside/laguna-xs-2.1:free";
+// Nous rotates its ":free" models often (an unknown model returns 404), so the
+// probe normally picks a live one via resolveNousProbeModel() and only uses
+// this constant when the public catalogue cannot be read.
+export const NOUS_VALIDATION_MODEL = "stepfun/step-3.7-flash:free";
 
 const asPositiveInteger = (value) => {
   const parsed = Number(value);
@@ -94,7 +97,42 @@ export function normalizeNousFreeModels(payload) {
  * tests. Nous exposes /models publicly, so only an authenticated inference
  * request can prove that a Portal API key or OAuth token is accepted.
  */
-export function createNousApiKeyProbe(apiKey) {
+/**
+ * Pick a zero-cost text model that Nous currently serves, for the credential
+ * probe. Prefers NOUS_VALIDATION_MODEL when it is still listed. /models is
+ * public, so this needs no credential. Never throws: falls back to the
+ * constant on any error.
+ */
+export async function resolveNousProbeModel(fetchImpl = fetch) {
+  try {
+    const res = await fetchImpl(NOUS_MODELS_URL, {
+      method: "GET",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return NOUS_VALIDATION_MODEL;
+    const free = getRawModels(await res.json())
+      .filter((model) => typeof model?.id === "string"
+        && isTextCapable(model)
+        && isZeroPrice(model?.pricing?.prompt)
+        && isZeroPrice(model?.pricing?.completion))
+      .map((model) => model.id.trim());
+    if (free.includes(NOUS_VALIDATION_MODEL)) return NOUS_VALIDATION_MODEL;
+    return free[0] || NOUS_VALIDATION_MODEL;
+  } catch {
+    return NOUS_VALIDATION_MODEL;
+  }
+}
+
+export function buildNousProbeBody(model = NOUS_VALIDATION_MODEL) {
+  return JSON.stringify({
+    model,
+    messages: [{ role: "user", content: "ping" }],
+    max_tokens: 1,
+    stream: false,
+  });
+}
+
+export function createNousApiKeyProbe(apiKey, model = NOUS_VALIDATION_MODEL) {
   return {
     url: NOUS_CHAT_COMPLETIONS_URL,
     options: {
@@ -103,12 +141,7 @@ export function createNousApiKeyProbe(apiKey) {
         "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: NOUS_VALIDATION_MODEL,
-        messages: [{ role: "user", content: "ping" }],
-        max_tokens: 1,
-        stream: false,
-      }),
+      body: buildNousProbeBody(model),
     },
   };
 }
